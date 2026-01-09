@@ -16,6 +16,7 @@ import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.LinkedList;
 import java.util.concurrent.TimeoutException;
@@ -40,31 +41,34 @@ public class MulticastDnsRequestor {
     private MulticastSocket multicastSocket;
 
     public MulticastDnsRequestor(Context context) throws UnknownHostException, SocketException {
-        this((WifiManager)context.getSystemService(Context.WIFI_SERVICE));
-        this.context = context; //make sure we live long enough...
+        this((WifiManager) context.getSystemService(Context.WIFI_SERVICE));
+        this.context = context; // make sure we live long enough...
     }
 
     public MulticastDnsRequestor(WifiManager wifiManager) throws UnknownHostException, SocketException {
-        //Common multicast ip and port for service discovery
+        // Common multicast ip and port for service discovery
         this("224.0.0.251", 5353, wifiManager);
     }
 
-    public MulticastDnsRequestor(String multicastIP, int port, WifiManager wifiManager) throws UnknownHostException, SocketException {
+    public MulticastDnsRequestor(String multicastIP, int port, WifiManager wifiManager)
+            throws UnknownHostException, SocketException {
         this(multicastIP, port, null, wifiManager);
     }
 
-    public MulticastDnsRequestor(String multicastIP, int port, Context context) throws UnknownHostException, SocketException {
-        this(multicastIP, port, null, (WifiManager)context.getSystemService(Context.WIFI_SERVICE));
-        this.context = context; //make sure we live long enough...
+    public MulticastDnsRequestor(String multicastIP, int port, Context context)
+            throws UnknownHostException, SocketException {
+        this(multicastIP, port, null, (WifiManager) context.getSystemService(Context.WIFI_SERVICE));
+        this.context = context; // make sure we live long enough...
     }
 
-    public MulticastDnsRequestor(String multicastIP, int port, NetworkInterface networkInterface, WifiManager wifiManager) throws UnknownHostException, SocketException {
+    public MulticastDnsRequestor(String multicastIP, int port, NetworkInterface networkInterface,
+            WifiManager wifiManager) throws UnknownHostException, SocketException {
         this.multicastIP = multicastIP;
         this.multicastIPAddr = InetAddress.getByName(this.multicastIP);
         this.isIPv6 = this.multicastIPAddr instanceof Inet6Address;
         this.logPrefix = this.isIPv6 ? "ipv6: " : "ipv4: ";
         this.port = port;
-        this.queryTimeout = 10000; //Milliseconds
+        this.queryTimeout = 30000; // Milliseconds
 
         Log.d(TAG, String.format("Using %s:%s", multicastIPAddr, port));
 
@@ -84,7 +88,8 @@ public class MulticastDnsRequestor {
     }
 
     /**
-     * Send a multicast DNS request for the host, then listen until a response for the query is received
+     * Send a multicast DNS request for the host, then listen until a response for
+     * the query is received
      *
      * @param host
      * @return
@@ -94,64 +99,116 @@ public class MulticastDnsRequestor {
 
         WifiManager.MulticastLock multicastLock = this.wifiManager.createMulticastLock("MulticastDNSRequestor");
 
+        MulticastSocket socket = null;
+
         try {
             multicastLock.acquire();
-            openSocket();
 
-            DNSMessage q = new DNSMessage(host);
-            byte[] queryBytes = q.serialize();
+            // ===========================
+            // ソケットをここで全部作る
+            // ===========================
+            socket = new MulticastSocket(this.port);
+            socket.setReuseAddress(true);
+            socket.joinGroup(this.multicastIPAddr);
+            socket.setTimeToLive(255);
 
-            DatagramPacket request = new DatagramPacket(queryBytes, queryBytes.length, this.multicastIPAddr, this.port);
-            Log.i(TAG, this.logPrefix + "Sending Request: " + q);
-            this.multicastSocket.send(request);
-            Log.d(TAG, this.logPrefix + "Request Sent");
+            // 受信タイムアウト（1秒）
+            socket.setSoTimeout(30000);
 
             byte[] responseBuffer = new byte[BUFFER_SIZE];
             DatagramPacket response = new DatagramPacket(responseBuffer, BUFFER_SIZE);
 
+            DNSMessage[] queries = new DNSMessage[] {
+                    new DNSMessage(host, true), // QU
+                    new DNSMessage(host, false) // QM
+            };
+
             long startTime = System.currentTimeMillis();
-            while ((System.currentTimeMillis()-startTime) < this.queryTimeout) {
-                openSocket();
-                java.util.Arrays.fill(responseBuffer, (byte) 0); // clear buffer
+
+            // ===========================
+            // mDNS クエリ送信
+            // ===========================
+            for (DNSMessage qmsg : queries) {
+                byte[] queryBytes = qmsg.serialize();
+                DatagramPacket request = new DatagramPacket(
+                        queryBytes, queryBytes.length, multicastIPAddr, port);
+
+                Log.i(TAG, logPrefix + "Sending Request: " + qmsg);
+                socket.send(request);
+            }
+
+            // ===========================
+            // 応答受信ループ
+            // ===========================
+            while (System.currentTimeMillis() - startTime < queryTimeout) {
+
+                Arrays.fill(responseBuffer, (byte) 0);
+
                 try {
-                    Log.d(TAG, this.logPrefix + "About to receive");
-                    multicastSocket.receive(response);
-                    Log.d(TAG, this.logPrefix + "Received. Processing...");
-                    try
-                    {
-                        DNSMessage responseMsg = new DNSMessage(response.getData(), response.getOffset(), response.getLength());
-                        for (DNSAnswer a : responseMsg.getAnswers()) {
-                            if (a.name.equals(host)) {
-                                if (a.type == DNSComponent.Type.A) {
-                                    Log.i(TAG, this.logPrefix + "Got IPv4 answer: " + a);
-                                    return a.getRdataString().replace("/", "");
-                                } else {
-                                    Log.d(TAG, this.logPrefix + "Ignoring response type " + a.type);
-                                }
-                            } else{
-                                Log.d(TAG, this.logPrefix + "Ignoring response for host " + a.name);
-                            }
-                        }
-                   
-                        Log.d(TAG, this.logPrefix + "Ignored response " + responseMsg); 
-                        
-                    } catch (Exception dnsEx) {
-                        Log.v(TAG, this.logPrefix + "Unsupported packet. Message: " + dnsEx.getMessage());
+                    Log.d(TAG, logPrefix + "About to receive");
+                    socket.receive(response);
+                    Log.d(TAG, logPrefix + "Received. Processing...");
+
+                    DNSMessage responseMsg = new DNSMessage(response.getData(), response.getOffset(),
+                            response.getLength());
+
+                    String hostLower = (host == null) ? "" : host.toLowerCase();
+                    if (hostLower.endsWith(".")) {
+                        hostLower = hostLower.substring(0, hostLower.length() - 1);
                     }
+
+                    String hostWithLocal = hostLower.endsWith(".local")
+                            ? hostLower
+                            : hostLower + ".local";
+
+                    for (DNSAnswer a : responseMsg.getAnswers()) {
+
+                        String answerName = (a.name == null) ? "" : a.name.toLowerCase();
+                        if (answerName.endsWith(".")) {
+                            answerName = answerName.substring(0, answerName.length() - 1);
+                        }
+
+                        boolean matches = answerName.equals(hostLower) ||
+                                answerName.equals(hostWithLocal) ||
+                                (hostLower.endsWith(".local") &&
+                                        answerName.equals(
+                                                hostLower.replaceFirst("\\.local$", "")));
+
+                        if (matches && a.type == DNSComponent.Type.A) {
+                            Log.i(TAG, logPrefix + "Got IPv4 answer: " + a);
+                            return a.getRdataString().replace("/", "");
+                        }
+                    }
+
+                } catch (SocketTimeoutException e) {
+                    Log.v(TAG, logPrefix + "Timeout waiting for packet");
                 }
-                catch (SocketTimeoutException stEx) {
-                    Log.v(TAG, this.logPrefix + "Timeout");
-                }
-                catch (IOException ioEx) {
-                    Log.w(TAG, this.logPrefix + "Error during query: " + ioEx.getStackTrace());
-                }
-            }        
+            }
+
+            // タイムアウト
+            throw new QueryTimeoutException();
 
         } finally {
-            multicastLock.release();
-        }
 
-        throw new QueryTimeoutException();
+            // ===========================
+            // 完全クリーンアップ
+            // ===========================
+            if (socket != null) {
+                try {
+                    socket.leaveGroup(multicastIPAddr);
+                } catch (Exception ignored) {
+                }
+
+                try {
+                    socket.close();
+                } catch (Exception ignored) {
+                }
+            }
+
+            if (multicastLock.isHeld()) {
+                multicastLock.release();
+            }
+        }
     }
 
     private void openSocket() throws IOException {
@@ -160,33 +217,65 @@ public class MulticastDnsRequestor {
         multicastSocket.setReuseAddress(true);
         multicastSocket.setNetworkInterface(networkInterface);
         multicastSocket.joinGroup(this.multicastIPAddr);
-        multicastSocket.setSoTimeout(5000);
+        multicastSocket.setSoTimeout(30000);
     }
 
     public NetworkInterface getWifiNetworkInterface() throws SocketException {
         WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+        if (wifiInfo == null) {
+            Log.e(TAG, this.logPrefix + "No WiFi connection info available");
+            throw new SocketException("No WiFi connection info available");
+        }
 
-        for(Enumeration<NetworkInterface> list = NetworkInterface.getNetworkInterfaces(); list.hasMoreElements();)
-        {
-            NetworkInterface i = list.nextElement();
-            for (InterfaceAddress ifAddr : i.getInterfaceAddresses()) {
-                int wifiIp = wifiInfo.getIpAddress();
-                int ifIp = inetAddressToInt(ifAddr.getAddress());
+        int wifiIp = wifiInfo.getIpAddress();
+        if (wifiIp == 0) {
+            Log.e(TAG, this.logPrefix + "No valid IP address from WiFi connection");
+            throw new SocketException("No valid IP address from WiFi connection");
+        }
 
-                Log.d(TAG, this.logPrefix + String.format("Comparing %s and %s", wifiIp, ifIp));
+        Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+        if (interfaces == null) {
+            Log.e(TAG, this.logPrefix + "Failed to get network interfaces");
+            throw new SocketException("Failed to get network interfaces");
+        }
 
-                if (wifiIp==ifIp) {
-                    Log.i(TAG, this.logPrefix + String.format("Using %s as the network interface as it matches WifiManager IP of %s", i, wifiInfo.getIpAddress()));
-                    return i;
+        while (interfaces.hasMoreElements()) {
+            NetworkInterface iface = interfaces.nextElement();
+            if (iface == null)
+                continue;
+
+            if (!iface.isUp() || iface.isLoopback()) {
+                continue;
+            }
+
+            for (InterfaceAddress ifAddr : iface.getInterfaceAddresses()) {
+                if (ifAddr == null || ifAddr.getAddress() == null)
+                    continue;
+
+                try {
+                    int ifIp = inetAddressToInt(ifAddr.getAddress());
+                    Log.d(TAG, this.logPrefix + String.format("Comparing WiFi IP %s with interface IP %s on %s", wifiIp,
+                            ifIp, iface.getName()));
+
+                    if (wifiIp == ifIp) {
+                        Log.i(TAG, this.logPrefix + String.format("Using %s as the network interface (IP: %s)",
+                                iface.getName(), wifiInfo.getIpAddress()));
+                        return iface;
+                    }
+                } catch (IllegalArgumentException e) {
+                    Log.d(TAG, this.logPrefix + "Skipping non-IPv4 address on " + iface.getName());
                 }
             }
         }
-        Log.e(TAG, this.logPrefix + "Couldn't find a network interface for the wifi IP: " + wifiInfo.getIpAddress());
-        return null;
+
+        Log.e(TAG, this.logPrefix
+                + String.format("No matching network interface found for WiFi IP: %s", wifiInfo.getIpAddress()));
+        throw new SocketException("No matching network interface found for WiFi");
     }
 
     /**
      * From android.net.NetworkUtils which is not available
+     * 
      * @param inetAddr
      * @return
      * @throws IllegalArgumentException
@@ -194,11 +283,11 @@ public class MulticastDnsRequestor {
     private static int inetAddressToInt(InetAddress inetAddr)
             throws IllegalArgumentException {
 
-        byte [] addr = inetAddr.getAddress();
-        return  ((addr[3] & 0xff) << 24) |
+        byte[] addr = inetAddr.getAddress();
+        return ((addr[3] & 0xff) << 24) |
                 ((addr[2] & 0xff) << 16) |
                 ((addr[1] & 0xff) << 8) |
-                 (addr[0] & 0xff);
+                (addr[0] & 0xff);
     }
 
 }

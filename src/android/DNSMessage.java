@@ -31,7 +31,7 @@ import java.util.TreeMap;
  * @author simmons
  */
 public class DNSMessage {
-    
+
     private static short nextMessageId = 0;
 
     private short messageId;
@@ -48,28 +48,51 @@ public class DNSMessage {
 
     private LinkedList<DNSAnswer> answers = new LinkedList<DNSAnswer>();
 
+    // 追加: QU/QM フラグ(デフォルト false (QM扱い))
+    public boolean isQU = false;
+
+    /**
+     * 全質問を QU に設定
+     */
+    public void setQU() {
+        this.isQU = true;
+        for (DNSQuestion q : questions) {
+            q.isQU = true;
+        }
+    }
+
+    /**
+     * 全質問を QM に設定
+     */
+    public void setQM() {
+        this.isQU = false;
+        for (DNSQuestion q : questions) {
+            q.isQU = false;
+        }
+    }
+
     /**
      * Construct a DNS host query
      */
-    public DNSMessage(String hostname) {
+    public DNSMessage(String hostname, boolean isQU) {
         messageId = nextMessageId++;
-        questions.add(new DNSQuestion(DNSQuestion.Type.ANY, hostname));
+        questions.add(new DNSQuestion(DNSQuestion.Type.A, hostname, isQU));
     }
-    
+
     /**
      * Parse the supplied packet as a DNS message.
      */
     public DNSMessage(byte[] packet) {
         parse(packet, 0, packet.length);
     }
-    
+
     /**
      * Parse the supplied packet as a DNS message.
      */
     public DNSMessage(byte[] packet, int offset, int length) {
         parse(packet, offset, length);
     }
-    
+
     public int length() {
         int length = 12; // header length
         for (DNSQuestion q : questions) {
@@ -80,10 +103,10 @@ public class DNSMessage {
         }
         return length;
     }
-    
+
     public byte[] serialize() {
         DNSBuffer buffer = new DNSBuffer(length());
-        
+
         // header
         buffer.writeShort(messageId);
         buffer.writeShort(0); // flags
@@ -91,23 +114,23 @@ public class DNSMessage {
         buffer.writeShort(answers.size()); // ancount
         buffer.writeShort(0); // nscount
         buffer.writeShort(0); // arcount
-        
+
         // questions
         for (DNSQuestion question : questions) {
             question.serialize(buffer);
         }
-        
+
         // answers
         for (DNSAnswer answer : answers) {
             answer.serialize(buffer);
         }
-        
+
         return buffer.bytes;
     }
-    
+
     private void parse(byte[] packet, int offset, int length) {
         DNSBuffer buffer = new DNSBuffer(packet, offset, length);
-        
+
         // header
         messageId = buffer.readShort();
         buffer.readShort(); // flags
@@ -115,30 +138,30 @@ public class DNSMessage {
         int ancount = buffer.readShort();
         buffer.readShort(); // nscount
         buffer.readShort(); // arcount
-        
+
         // questions
         questions.clear();
-        for (int i=0; i<qdcount; i++) {
+        for (int i = 0; i < qdcount; i++) {
             questions.add(new DNSQuestion(buffer));
         }
-        
+
         // answers
         answers.clear();
-        for (int i=0; i<ancount; i++) {
+        for (int i = 0; i < ancount; i++) {
             answers.add(new DNSAnswer(buffer));
         }
     }
-    
+
     public String toString() {
         StringBuilder sb = new StringBuilder();
-        
+
         // questions
         for (DNSQuestion q : questions) {
-            sb.append(q.toString()+"\n");
+            sb.append(q.toString() + "\n");
         }
-        
+
         // group answers by name
-        SortedMap<String,List<DNSAnswer>> answersByName = new TreeMap<String,List<DNSAnswer>>();
+        SortedMap<String, List<DNSAnswer>> answersByName = new TreeMap<String, List<DNSAnswer>>();
         for (DNSAnswer a : answers) {
             List<DNSAnswer> list;
             if (answersByName.containsKey(a.name)) {
@@ -150,9 +173,9 @@ public class DNSMessage {
             list.add(a);
         }
         for (Map.Entry<String, List<DNSAnswer>> entry : answersByName.entrySet()) {
-            sb.append(entry.getKey()+"\n");
-            for (DNSAnswer a : entry.getValue()){
-                sb.append("  "+a.type.toString()+" "+a.getRdataString()+"\n");
+            sb.append(entry.getKey() + "\n");
+            for (DNSAnswer a : entry.getValue()) {
+                sb.append("  " + a.type.toString() + " " + a.getRdataString() + "\n");
             }
         }
 

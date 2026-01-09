@@ -18,56 +18,59 @@ package com.koalasafe.cordova.plugin.multicastdns;
 
 /**
  * This class represents a DNS "question" component.
+ * 
  * @author simmons
  */
 public class DNSQuestion extends DNSComponent {
-    
+
     public Type type;
     public String name;
-    
+    public boolean isQU = false; // デフォルト false (QM扱い)
+
     public DNSQuestion(Type type, String name) {
         this.type = type;
         this.name = name;
     }
-    
+
+    // 新しいコンストラクタでフラグ指定可能
+    public DNSQuestion(Type type, String name, boolean isQU) {
+        this.type = type;
+        this.name = name;
+        this.isQU = isQU;
+    }
+
     public DNSQuestion(DNSBuffer buffer) {
         parse(buffer);
     }
-    
-    /**
-     * Return the expected byte length of this question.
-     */
+
     public int length() {
         int length = DNSBuffer.nameByteLength(name);
-        length += 5; // zero-terminating length byte, qtype short, qclass short 
+        length += 5; // zero-terminating byte + qtype + qclass
         return length;
     }
-    
-    /**
-     * Render this DNS question into a byte buffer
-     */
+
     public void serialize(DNSBuffer buffer) {
         buffer.checkRemaining(length());
         buffer.writeName(name); // qname
         buffer.writeShort(type.qtype); // qtype
-        buffer.writeShort(1); // qclass (IN)
+        int qclass = 1; // IN
+        if (isQU) {
+            qclass |= 0x8000; // QU フラグ (1<<15)
+        }
+        buffer.writeShort(qclass);
     }
 
-    /**
-     * Parse a question from the byte buffer
-     * @param buffer
-     */
     private void parse(DNSBuffer buffer) {
         name = buffer.readName();
         type = Type.getType(buffer.readShort());
         int qclass = buffer.readShort();
-        if (qclass != 1) {
-            throw new DNSException("only class IN supported.  (got "+qclass+")");
+        isQU = (qclass & 0x8000) != 0; // QU フラグ判定
+        if ((qclass & 0x7FFF) != 1) {
+            throw new DNSException("only class IN supported.  (got " + qclass + ")");
         }
     }
-    
-    public String toString() {
-        return type.toString()+"? "+name;
-    }
 
+    public String toString() {
+        return type.toString() + "? " + name + (isQU ? " (QU)" : " (QM)");
+    }
 }
