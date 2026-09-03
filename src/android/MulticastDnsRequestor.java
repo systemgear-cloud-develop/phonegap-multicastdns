@@ -35,7 +35,7 @@ public class MulticastDnsRequestor {
     private Context context;
 
     private static final long RETRY_INTERVAL = 3000; // 3秒再送
-    private static final int QUERY_TIMEOUT = 30000; // 全体のクエリタイムアウト（30秒）
+    private static final int QUERY_TIMEOUT = 10000; // 全体のクエリタイムアウト（30秒）
     private static final int SOCKET_RECEIVE_TIMEOUT = 5000; // ソケット受信タイムアウト（ミリ秒）
     private static final int MULTICAST_TTL = 255;
     private static final String MULTICAST_IP = "224.0.0.251";
