@@ -34,9 +34,11 @@ public class MulticastDnsRequestor {
     private int port;
     private Context context;
 
-    private static final long RETRY_INTERVAL = 3000; // 3秒再送
-    private static final int QUERY_TIMEOUT = 10000; // 全体のクエリタイムアウト（30秒）
-    private static final int SOCKET_RECEIVE_TIMEOUT = 5000; // ソケット受信タイムアウト（ミリ秒）
+    private static final long RETRY_INTERVAL = 1500; // 1.5秒再送
+    private static final int MAX_QUERY_COUNT = 7; // 送信回数（初回送信＋再送6回。1回につきQU/QMの2パケット）
+    private static final int QUERY_TIMEOUT = 10000; // 全体のクエリタイムアウト（10秒）
+    private static final int SOCKET_RECEIVE_TIMEOUT = 5000; // ソケット受信タイムアウトの上限（ミリ秒）
+    private static final int MIN_SOCKET_RECEIVE_TIMEOUT = 1; // setSoTimeout(0)は無制限待ちになるため下限を設ける
     private static final int MULTICAST_TTL = 255;
     private static final String MULTICAST_IP = "224.0.0.251";
     private static final int MULTICAST_PORT = 5353;
@@ -156,18 +158,21 @@ public class MulticastDnsRequestor {
             DatagramPacket response = new DatagramPacket(responseBuffer, BUFFER_SIZE);
 
             DNSMessage[] queries = new DNSMessage[] {
+                    new DNSMessage(sendHost, true), // i = 0: QU
                     new DNSMessage(sendHost, false) // i = 1: QM
             };
 
             long startTime = System.currentTimeMillis();
             long lastSentTime = startTime - RETRY_INTERVAL; // 初回即時送信のため
+            int sentCount = 0; // 送信済み回数（MAX_QUERY_COUNT に達したら再送しない）
 
             while (System.currentTimeMillis() - startTime < QUERY_TIMEOUT) {
                 long now = System.currentTimeMillis();
 
                 // --- 定期送信判定 ---
-                if (now - lastSentTime >= RETRY_INTERVAL) {
+                if (sentCount < MAX_QUERY_COUNT && now - lastSentTime >= RETRY_INTERVAL) {
                     lastSentTime = now;
+                    sentCount++;
 
                     for (DNSMessage qmsg : queries) {
                         byte[] queryBytes = qmsg.serialize();
@@ -193,6 +198,16 @@ public class MulticastDnsRequestor {
                         }
                     }
                 }
+
+                // --- 受信待ち時間の設定 ---
+                long nextSendIn = (sentCount < MAX_QUERY_COUNT)
+                        ? RETRY_INTERVAL - (System.currentTimeMillis() - lastSentTime)
+                        : Long.MAX_VALUE;
+                long timeLeftForQuery = QUERY_TIMEOUT - (System.currentTimeMillis() - startTime);
+                long waitMillis = Math.min(nextSendIn, timeLeftForQuery);
+                waitMillis = Math.min(waitMillis, SOCKET_RECEIVE_TIMEOUT);
+                waitMillis = Math.max(waitMillis, MIN_SOCKET_RECEIVE_TIMEOUT);
+                socket.setSoTimeout((int) waitMillis);
 
                 // --- パケット受信・解析 ---
                 Arrays.fill(responseBuffer, (byte) 0);
@@ -227,9 +242,9 @@ public class MulticastDnsRequestor {
                     }
 
                 } catch (java.net.SocketTimeoutException e) {
-                    // 全体のタイムアウト時間を過ぎているか、あるいは次のループに入ってもすぐタイムアウトになる残時間（例: 残り5000ms未満）か判定
+                    // 全体のタイムアウト時間を過ぎているか、あるいは次のループに入ってもすぐタイムアウトになる残時間か判定
                     long timeLeft = QUERY_TIMEOUT - (System.currentTimeMillis() - startTime);
-                    if (timeLeft <= SOCKET_RECEIVE_TIMEOUT) {
+                    if (timeLeft <= waitMillis) {
                         // 全体のタイムアウト直前、または過ぎている場合のみログを出す
                         Log.w(TAG, LOG_PREFIX + "socket.receive timed out. Remaining query window is exhausted ("
                                 + timeLeft + "ms left).");
